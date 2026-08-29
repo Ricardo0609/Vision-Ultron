@@ -81,12 +81,39 @@ async function askGemini({ model, apiKey, role, body }) {
 const app = express();
 
 app.use(express.json({ limit: '32kb' }));
-app.use(express.static(__dirname, { extensions: ['html'] }));
+
+// MIME types explícitos. Sin esto, algunos entornos sirven el CSS como
+// text/plain y el navegador lo rechaza ("strict MIME checking").
+const MIME_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon'
+};
+
+app.use(express.static(__dirname, {
+  extensions: ['html'],
+  setHeaders: (res, filePath) => {
+    const type = MIME_TYPES[path.extname(filePath).toLowerCase()];
+    if (type) res.setHeader('Content-Type', type);
+  }
+}));
 
 // Render llama esta ruta para saber si el servicio está vivo.
+// También sirve como diagnóstico: si esto no responde JSON, no es este servidor.
 app.get('/healthz', (req, res) => {
-  res.json({ ok: true, keyConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) });
+  res.json({
+    ok: true,
+    servidor: 'express',
+    keyConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+    modelo: GEMINI_MODEL
+  });
 });
+
+// Evita el 404 ruidoso en consola cuando el navegador pide el ícono.
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 app.post('/api/generate', async (req, res) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
@@ -179,14 +206,32 @@ app.post('/api/generate', async (req, res) => {
   });
 });
 
-// Cualquier ruta desconocida devuelve la app.
+// Una ruta /api/... que no existe debe fallar en JSON, no devolver el HTML
+// de la app: si no, el frontend recibe HTML, no lo puede parsear y muestra
+// un error genérico que no dice nada.
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: `La ruta ${req.method} /api${req.path} no existe en el servidor.` });
+});
+
+// Cualquier otra ruta desconocida devuelve la app.
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+// Red de seguridad: si algo revienta fuera de los try/catch, responde JSON.
+// Sin esto Express devuelve HTML y el error real se pierde.
+app.use((err, req, res, next) => {
+  console.error('Error no controlado:', err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Error interno del servidor. Revisa los logs.' });
+});
+
 app.listen(PORT, () => {
-  console.log(`Visión/Ultrón corriendo en http://localhost:${PORT}`);
-  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
+  console.log(`Visión/Ultrón corriendo en el puerto ${PORT}`);
+  console.log(`Modelo: ${GEMINI_MODEL} (respaldo: ${FALLBACK_MODEL})`);
+  if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) {
+    console.log('API key detectada correctamente.');
+  } else {
     console.warn('AVISO: no hay GEMINI_API_KEY configurada. La app cargará pero no podrá responder.');
   }
 });
